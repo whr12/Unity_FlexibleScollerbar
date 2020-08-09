@@ -16,14 +16,28 @@ namespace MyUI
         public class Point
         {
             public Vector2 position;
-            public Vector2 tanget;
+            public Vector2 tanget
+            {
+                get
+                {
+                    float omica = Mathf.Deg2Rad * theta;
+                    return new Vector2(Mathf.Cos(omica), Mathf.Sin(omica));
+                }
+                set
+                {
+                    theta = Mathf.Atan(value.y / value.x)*Mathf.Rad2Deg;
+                }
+            }
+
+            [Range(-180f,180f)]
+            [SerializeField]
+            private float theta;
 
             public Vector2 normal
             {
                 get
                 {
-                    Vector2 normalizedTanget = tanget.normalized;
-                    return new Vector2(-normalizedTanget.y, normalizedTanget.x);
+                    return new Vector2(-tanget.y, tanget.x);
                 }
             }
         }
@@ -153,6 +167,8 @@ namespace MyUI
                 base.material = value;
             }
         }
+
+        public List<Point> points { get { return m_Points; } }
         #endregion
 
         #region 私有变量
@@ -162,6 +178,7 @@ namespace MyUI
         [NonSerialized] protected bool m_SkipMaterialUpdate;
 
         [SerializeField] private Sprite m_Sprite;
+        [SerializeField] private float m_width;
 
         [NonSerialized] private Sprite m_OverrideSprite;
 
@@ -240,12 +257,35 @@ namespace MyUI
         /// <param name="end"></param>
         /// <param name="t"></param>
         /// <returns></returns>
-        static Point GetLinearCurvePoint(Point start, Point end, float t)
+        public static Point GetLinearCurvePoint(Point start, Point end, float t)
         {
             t = Mathf.Clamp01(t);
 
             Vector2 position = start.position + (end.position - start.position) * t;
             return new Point { position = position };
+        }
+
+        /// <summary>
+        /// 计算Hermit插值曲线的长度
+        /// </summary>
+        /// <param name="start"></param>
+        /// <param name="end"></param>
+        /// <param name="step">计算时的步长，影响计算精度</param>
+        /// <returns></returns>
+        public static float GetHermitCurveLength(Point start, Point end, float step = 0.1f)
+        {
+            float length = 0;
+            Point lastPoint = start;
+            for (float i = 0; i < 1f; i += step)
+            {
+                Point nextPoint = GetHermiteCurvePoint(start, end, i + step);
+                length += Vector2.Distance(lastPoint.position, nextPoint.position);
+                lastPoint = nextPoint;
+            }
+            length += Vector2.Distance(lastPoint.position, end.position);
+
+            return length;
+
         }
 
         /// <summary>
@@ -267,30 +307,19 @@ namespace MyUI
         /// <returns></returns>
         public static Vector4 GetHermiteCurveTangentFactory(float t)
         {
-            return new Vector4(6 * t * (t - 1), 6 * t * (1 - t), (2 * t + 1) * (t - 1), t * (3 * t - 2));
+            return new Vector4(6 * t * (t - 1), 6 * t * (1 - t), (3 * t - 1) * (t - 1), t * (3 * t - 2));
         }
 
         static void AddQuad(VertexHelper vertexHelper, Vector3[] quadPositions, Color32 color, Vector3[] quadUVs)
         {
             int startIndex = vertexHelper.currentVertCount;
 
-#if UNITY_EDITOR
-            string addVectexLog = "Add Quad: \n" ;
-#endif
-
             for (int i = 0; i < 4; ++i)
             {
-#if UNITY_EDITOR
-                addVectexLog += "Add Vertex: " + quadPositions[i] + "\n";
-#endif
                 vertexHelper.AddVert(quadPositions[i], color, quadUVs[i]);
             }
             vertexHelper.AddTriangle(startIndex, startIndex + 1, startIndex + 2);
             vertexHelper.AddTriangle(startIndex + 2, startIndex + 3, startIndex);
-
-#if UNITY_EDITOR
-            Debug.Log(addVectexLog);
-#endif
         }
 
         static void AddQuad(VertexHelper vertexHelper, Vector2 posMin, Vector2 posMax, Color32 color, Vector2 uvMin, Vector2 uvMax)
@@ -308,15 +337,12 @@ namespace MyUI
 
         static void AddVertex(VertexHelper vertexHelper, Point start, Point end, Color32 color, Vector2 startUV, Vector2 endUV, float width)
         {
-            Vector2 tanget = (start.position - end.position).normalized;
-            Vector2 normal = new Vector2(-tanget.y, tanget.x);
-
             Vector3[] vertexes = new Vector3[4];
 
-            vertexes[0] = start.position - normal * width;
-            vertexes[1] = start.position + normal * width;
-            vertexes[2] = end.position + normal * width;
-            vertexes[3] = end.position - normal * width;
+            vertexes[0] = start.position - start.normal * width;
+            vertexes[1] = start.position + start.normal * width;
+            vertexes[2] = end.position + end.normal * width;
+            vertexes[3] = end.position - end.normal * width;
 
             Vector3[] uvs = new Vector3[4];
             uvs[0] = new Vector3(startUV.x, startUV.y, 0);
@@ -329,6 +355,8 @@ namespace MyUI
         #endregion
 
         #region 重写方法
+
+        public float step = 5f;
         protected override void OnPopulateMesh(VertexHelper vertexHelper)
         {
             vertexHelper.Clear();
@@ -384,11 +412,14 @@ namespace MyUI
             if (tileHeight <= 0)
                 tileHeight = yMax - yMin;
 
+            tileWidth = tileWidth * m_width / tileHeight;
+
+            int cnt = 0;
             float length = 0;
             for(int i = 1; i < m_Points.Count; ++i)
             {
 
-                float segmentLength = Vector2.Distance(m_Points[i - 1].position, m_Points[i].position);
+                float segmentLength = GetHermitCurveLength(m_Points[i - 1], m_Points[i]);
 
                 float startUV = length % tileWidth;
 
@@ -396,27 +427,50 @@ namespace MyUI
                 float startLine = 0;
                 while (startLine < segmentLength)
                 {
-                    float nextLine = startLine + tileWidth - startUV;
+                    //float nextUV = startUV + 50;
+                    //if (nextUV > tileWidth)
+                    //{
+                    //    nextUV = tileWidth;
+                    //}
+                    //float nextLine = startLine + nextUV - startUV;
+
+                    //if (nextLine > segmentLength)
+                    //{
+                    //    nextLine = segmentLength;
+                    //    nextUV = startUV + nextLine - startLine;
+                    //}
+
+                    //Point subStartPoint = GetHermiteCurvePoint(m_Points[i - 1], m_Points[i], startLine / segmentLength);
+                    //Point subEndPoint = GetHermiteCurvePoint(m_Points[i - 1], m_Points[i], nextLine / segmentLength);
+
+                    //float startU = startUV / tileWidth;
+                    //float endU = startU + (nextLine - startLine) / tileWidth;
+
+                    //AddVertex(vertexHelper, subStartPoint, subEndPoint, color, new Vector2(startU, uvMin.y), new Vector2(endU, uvMax.y), m_width/2);
+                    //++cnt;
+
+                    //startUV = nextUV;
+                    //startLine = nextLine;
+                    //if (startUV >= tileWidth)
+                    //{
+                    //    startUV = 0;
+                    //}
+
+                    float nextLine = startLine + step;
                     if (nextLine > segmentLength)
                     {
                         nextLine = segmentLength;
                     }
-
                     Point subStartPoint = GetHermiteCurvePoint(m_Points[i - 1], m_Points[i], startLine / segmentLength);
                     Point subEndPoint = GetHermiteCurvePoint(m_Points[i - 1], m_Points[i], nextLine / segmentLength);
 
-                    float startU = startUV / tileWidth;
-                    float endU = startU + (nextLine - startLine) / tileWidth;
-
-                    AddVertex(vertexHelper, subStartPoint, subEndPoint, color, new Vector2(startU, uvMin.y), new Vector2(endU, uvMax.y), tileHeight/2);
-
-                    startUV = 0f;
+                    AddVertex(vertexHelper, subStartPoint, subEndPoint, color, new Vector2(startLine/segmentLength, 0), new Vector2(nextLine/segmentLength, 1), m_width / 2);
                     startLine = nextLine;
                 }
 
                 length += segmentLength;
             }
-
+            Debug.Log("Vertex number: " + (4 * cnt));
         }
 
         protected override void UpdateMaterial()
